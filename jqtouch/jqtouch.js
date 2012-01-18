@@ -24,6 +24,13 @@
 
 */
 
+/*
+
+    TODO
+		1. clear out inProgressNavigation after nav end so that a direct hash (e.g. nav back) uses sensible defaults
+
+*/
+
 (function($) {
     $.jQTouch = function(options) {
 
@@ -32,6 +39,7 @@
             $head=$('head'),
             initialPageId='',
             hist=[],
+            inProgressNavigation={},
             newPageCount=0,
             jQTSettings={},
             currentPage='',
@@ -49,7 +57,7 @@
                 addGlossToIcon: true,
                 backSelector: '.back, .cancel, .goback',
                 cacheGetRequests: true,
-                debug: false,
+                debug: true,
                 fallback2dAnimation: 'fade',
                 fixedViewport: true,
                 formSelector: 'form',
@@ -67,6 +75,8 @@
                 touchSelector: 'a, .touch',
                 useAnimations: true,
                 useFastTouch: true, // experimental
+                useInternalHashHandler: true, // set false if using backbone.js or other route handler,
+                initialPage: null,
                 animations: [ // highest to lowest priority
                     {selector:'.cube', name:'cubeleft', is3d:true},
                     {selector:'.cubeleft', name:'cubeleft', is3d:true},
@@ -110,12 +120,12 @@
                 animations.push(animation);
             }
         }
-        function addPageToHistory(page, animation) {
+        function addPageToHistory(page, hash, animation) {
             _debug();
             hist.unshift({
                 page: page,
                 animation: animation,
-                hash: '#' + page.attr('id'),
+                hash: hash,
                 id: page.attr('id')
             });
         }
@@ -155,6 +165,8 @@
         }
         function doNavigation(fromPage, toPage, animation, goingBack) {
             _debug();
+
+            _debug('goingBack='+goingBack);
 
             // Error check for target page
             if (toPage.length === 0) {
@@ -225,7 +237,7 @@
             // Define private navigationEnd callback
             function navigationEndHandler(event) {
                 _debug();
-                
+
                 if ($.support.animationEvents && animation && jQTSettings.useAnimations) {
                     fromPage.unbind('webkitAnimationEnd', navigationEndHandler);
                     fromPage.unbind('webkitTransitionEnd', navigationEndHandler);
@@ -242,12 +254,11 @@
                 if (goingBack) {
                     hist.shift();
                 } else {
-                    addPageToHistory(currentPage, animation);
+                    addPageToHistory(currentPage, location.hash, animation);
                 }
 
                 fromPage.unselect();
                 lastAnimationTime = (new Date()).getTime();
-                setHash(currentPage.attr('id'));
                 tapReady = true;
 
                 // Trigger custom events
@@ -263,36 +274,13 @@
             _debug();
             return orientation;
         }
-        function goBack() {
+        function showPage(toPage) {
             _debug();
 
-            // Error checking
-            if (hist.length < 1 ) {
-                _debug('History is empty.');
-            }
-
-            if (hist.length === 1 ) {
-                _debug('You are on the first panel.');
-            }
-
-            var from = hist[0], to = hist[1];
-
-            if (doNavigation(from.page, to.page, from.animation, true)) {
-                return publicObj;
-            } else {
-                _debug('Could not go back.');
-                return false;
-            }
-
-        }
-        function goTo(toPage, animation, reverse) {
-            _debug();
-
-            if (reverse) {
-                _log('The reverse parameter of the goTo() function has been deprecated.');
-            }
-
-            var fromPage = hist[0].page;
+            var fromPage = currentPage = $('#jqt > .current:first');
+            var animation = inProgressNavigation.animation;
+            var reverse = inProgressNavigation.reverse;
+            var referrer = inProgressNavigation.referrer;
 
             if (typeof animation === 'string') {
                 for (var i=0, max=animations.length; i < max; i++) {
@@ -312,28 +300,61 @@
                     return;
                 } else {
                     toPage = nextPage;
+                    if (referrer) {
+                        toPage.data('referrer', referrer);
+                    }
                 }
+            }
 
+            return doNavigation(fromPage, toPage, animation, reverse)
+        }
+        function goBack() {
+            _debug();
+
+            // Error checking
+            if (hist.length < 1 ) {
+                _debug('History is empty.');
             }
-            if (doNavigation(fromPage, toPage, animation)) {
-                return publicObj;
-            } else {
-                _debug('Could not animate pages.');
-                return false;
+
+            if (hist.length === 1 ) {
+                _debug('You are on the first panel.');
             }
+
+            var from = hist[0], to = hist[1];
+
+            inProgressNavigation = {
+                hash: to.hash,
+                animation: from.animation,
+                reverse: true
+            }
+
+            // let router detect and handle
+            setHash(to.hash);
+
+            return publicObj;
+        }
+        function goTo(hash, animation, reverse, referrer) {
+            _debug();
+
+            if (reverse) {
+                _log('The reverse parameter of the goTo() function has been deprecated.');
+            }
+
+            inProgressNavigation = {
+                hash: hash,
+                animation: animation,
+                reverse: false,
+                referrer: referrer
+            }
+
+            // let router detect and handle
+            setHash(hash);
+
+            return publicObj;
         }
         function hashChangeHandler(e) {
             _debug();
-            if (location.hash === hist[0].hash) {
-                _debug('We are on the right panel');
-            } else {
-                _debug('We are not on the right panel');
-                if(location.hash === hist[1].hash) {
-                    goBack();
-                } else {
-                    _debug(location.hash + ' !== ' + hist[1].hash);
-                } 
-            }
+			showPage(location.hash);
         }
         function init(options) {
             _debug();
@@ -640,7 +661,7 @@
                 if (hash && hash !== '#') {
                     // Internal href
                     $el.addClass('active');
-                    goTo($(hash).data('referrer', $el), animation, $el.hasClass('reverse'));
+                    goTo(hash, animation, $el.hasClass('reverse'), $el);
                     return false;
 
                 } else {
@@ -890,31 +911,40 @@
             }
 
             // Bind events
-            $(window).bind('hashchange', hashChangeHandler);
-            $body.bind('touchstart', touchStartHandler)
-                .bind('click', clickHandler)
+            if (jQTSettings.useInternalHashHandler) {
+                $(window).bind('hashchange', hashChangeHandler);
+            }
+/* customisation to v166
+    - revert binding of touchstart back to v159 so that useFastTouch property is honoured
+    - with out this clicks leak through onto newly rendered pages
+*/
+            if ($.support.touch) {
+                $body.bind('touchstart', touchStartHandler);
+            }
+            $body.bind('click', clickHandler)
+/* end customisation */
                 .bind('mousedown', mousedownHandler)
                 .bind('orientationchange', orientationChangeHandler)
                 .bind('submit', submitHandler)
                 .bind('tap', tapHandler)
                 .trigger('orientationchange');
             
-            
-            // Determine what the "current" (initial) panel should be
+
+            // Determine what the initial hash should be
+            var intialPageHash;
             if ($('#jqt > .current').length == 0) {
-                currentPage = $('#jqt > *:first');
+                if (!jQTSettings.initialPage) {
+                    initialPageHash = $('#jqt > *:first').attr('id');
+                } else {
+                    initialPageHash = jQTSettings.initialPage;
+                }
             } else {
-                currentPage = $('#jqt > .current:first');
+                initialPageHash = $('#jqt > .current:first').attr('id');
                 $('#jqt > .current').removeClass('current');
             }
 
-            // Go to the top of the "current" page
-            $(currentPage).addClass('current');
-            initialPageId = $(currentPage).attr('id');
-            setHash(initialPageId);
-            addPageToHistory(currentPage);
-            scrollTo(0, 0);
-            
+            setHash(initialPageHash);
+
             // Make sure none of the panels yank the location bar into view
             $('#jqt > *').css('minHeight', window.innerHeight);
 
@@ -927,6 +957,7 @@
             getOrientation: getOrientation,
             goBack: goBack,
             goTo: goTo,
+            showPage: showPage,
             hist: hist,
             settings: jQTSettings,
             submitForm: submitHandler,
